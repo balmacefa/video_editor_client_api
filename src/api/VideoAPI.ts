@@ -8,11 +8,14 @@ import fs from 'fs';
 import Joi from 'joi';
 import path from 'path';
 import KnexDatabase from '../server/KnexDatabase';
+import { apiKeyMiddleware } from './apiKeyMiddleware';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 const db = KnexDatabase;
 const router = Router();
+
+router.use(apiKeyMiddleware);
 
 /**
  * Inicializa la tabla "video_compositions" si no existe.

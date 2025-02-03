@@ -4,10 +4,15 @@ import ffmpegStatic from 'ffmpeg-static';
 import ffmpeg from 'fluent-ffmpeg';
 import { PassThrough } from 'stream';
 import { WritableStreamBuffer } from 'stream-buffers';
+import { apiKeyMiddleware } from './apiKeyMiddleware';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 const router = Router();
+
+
+router.use(apiKeyMiddleware);
+
 
 /**
  * Limpia el prefijo Data URL de una cadena base64.
