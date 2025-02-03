@@ -4,8 +4,9 @@ import { readFileSync } from "fs";
 import path from 'path';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
-import { defineRoutes } from './api/routes';
+import { api_router_audio } from './api/AudioAPI';
 import { ENV } from './server/global_variables';
+import { api_router_video } from './api/VideoAPI';
 
 
 
@@ -90,7 +91,10 @@ export const createApp = async () => {
 
 
     // Define routes
-    defineRoutes(app);
+    // defineRoutes(app);
+    app.use('/', api_router_audio);
+    app.use('/', api_router_video);
+    // api_router_audio(app)
 
     return app;
 };

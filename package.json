@@ -36,7 +36,6 @@
         "stream-buffers": "^3.0.3",
         "swagger-jsdoc": "^6.2.8",
         "swagger-ui-express": "^5.0.1",
-        "whatsapp-web.js": "^1.26.0",
         "zod": "^3.24.1"
     }
 }
