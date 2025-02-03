@@ -25,7 +25,7 @@ router.use(apiKeyMiddleware);
  * - Sin embargo, sí registramos logs y lanzamos la excepción para que sea manejada
  *   posteriormente (p.ej., en la ruta que la invoque).
  */
-async function initializeVideoCompositionTable(): Promise<void> {
+export async function initializeVideoCompositionTable(): Promise<void> {
     try {
         const exists = await db.schema.hasTable('video_compositions');
         if (!exists) {

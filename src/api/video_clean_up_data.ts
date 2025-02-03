@@ -1,15 +1,23 @@
 import * as fs from 'fs';
 import KnexDatabase from "../server/KnexDatabase";
+import { initializeVideoCompositionTable } from './VideoAPI';
 
 
 // videoDataRouter.ts
 const db = KnexDatabase;
 
+
+// Intervalo de 15 minutos (en milisegundos)
+const CLEANUP_INTERVAL = 15 * 60 * 1000;
+
 async function cleanExpiredVideos(): Promise<void> {
     try {
-        console.log('[Cleanup] Iniciando limpieza de videos expirados...');
+        console.log(`[Cleanup] Programador iniciado. Iniciando limpieza de videos expirados... Ejecutando cada ${CLEANUP_INTERVAL / 60000} minutos.`);
 
+        // 0 . init the sqlite table
+        await initializeVideoCompositionTable();
         // 1. Obtener registros con expiración pasada
+
         const expiredRecords = await db('video_compositions')
             .where('expiration_time', '<', db.fn.now())
             .whereNotNull('video_path');
@@ -44,12 +52,10 @@ async function cleanExpiredVideos(): Promise<void> {
         console.log('[Cleanup] Limpieza completada con éxito.');
     } catch (error) {
         console.error('[Cleanup] Error en proceso de limpieza:', error);
+        console.error('[Cleanup] Reintentando en 15 minutos:', error);
     }
 }
 
-
-// Intervalo de 15 minutos (en milisegundos)
-const CLEANUP_INTERVAL = 15 * 60 * 1000;
 
 // Iniciar programador cuando el servidor arranque
 export function startVideoCleanupScheduler() {
@@ -58,6 +64,5 @@ export function startVideoCleanupScheduler() {
 
     // Programar ejecución periódica
     setInterval(cleanExpiredVideos, CLEANUP_INTERVAL);
-    console.log(`[Cleanup] Programador iniciado. Ejecutando cada ${CLEANUP_INTERVAL / 60000} minutos.`);
 }
 
