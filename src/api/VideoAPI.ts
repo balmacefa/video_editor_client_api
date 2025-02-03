@@ -640,6 +640,8 @@ router.post(
     }
 );
 
+
+// TODO: change to POST and app swagger docs
 /**
  * Método opcional para consultar estado de la composición:
  *   GET /api/videos/status/:id
