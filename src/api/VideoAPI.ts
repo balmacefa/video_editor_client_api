@@ -36,7 +36,7 @@ async function initializeVideoCompositionTable(): Promise<void> {
                 table.json('steps').defaultTo(JSON.stringify([]));
                 table.string('folder_path').notNullable();
                 table.string('video_path').nullable();
-                table.timestamp('expiration_time').nullable();
+                table.timestamp('expiration_time').nullable().index(); // Agregar índice
                 table.timestamps(true, true);
             });
             console.log('[DB] Tabla "video_compositions" creada con éxito.');
@@ -641,35 +641,91 @@ router.post(
 );
 
 
-// TODO: change to POST and app swagger docs
 /**
- * Método opcional para consultar estado de la composición:
- *   GET /api/videos/status/:id
+ * @swagger
+ * /api/videos/status:
+ *   post:
+ *     tags: [/api/video]
+ *     summary: Consultar el estado de una composición de video
+ *     description: Recibe un ID y devuelve el estado actual de la composición, incluyendo los pasos completados y la ruta del video si está disponible.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               id:
+ *                 type: string
+ *                 description: ID único de la composición de video
+ *             required:
+ *               - id
+ *     responses:
+ *       200:
+ *         description: Estado de la composición obtenido exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *                 steps:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                 video_path:
+ *                   type: string
+ *                 expiration_time:
+ *                   type: string
+ *                   format: date-time
+ *                 created_at:
+ *                   type: string
+ *                   format: date-time
+ *                 updated_at:
+ *                   type: string
+ *                   format: date-time
+ *       404:
+ *         description: No se encontró la composición con el ID proporcionado
+ *       500:
+ *         description: Error interno al consultar el estado
  */
-router.get('/api/videos/status/:id', async (req: Request, res: Response): Promise<any> => {
-    const { id } = req.params;
-    try {
-        console.log(`[GET /api/videos/status] Consultando estado de la composición ID: ${id}.`);
+router.post(
+    '/api/videos/status',
+    celebrate({
+        [Segments.BODY]: Joi.object({
+            id: Joi.string().required()
+        })
+    }),
+    async (req: Request, res: Response): Promise<any> => {
+        const { id } = req.body;
+        try {
+            console.log(`[POST /api/videos/status] Consultando estado de la composición ID: ${id}.`);
 
-        const composition = await db('video_compositions').where({ id }).first();
-        if (!composition) {
-            return res.status(404).json({ error: 'No existe una composición con ese ID.' });
+            const composition = await db('video_compositions').where({ id }).first();
+            if (!composition) {
+                return res.status(404).json({ error: 'No existe una composición con ese ID.' });
+            }
+
+            res.json({
+                id: composition.id,
+                status: composition.status,
+                steps: JSON.parse(composition.steps || '[]'),
+                video_path: composition.video_path,
+                expiration_time: composition.expiration_time,
+                created_at: composition.created_at,
+                updated_at: composition.updated_at
+            });
+        } catch (error: any) {
+            console.error('[POST /api/videos/status] Error al obtener estado:', error);
+            res.status(500).json({ error: 'Error interno al consultar el estado de la composición.' });
         }
-
-        res.json({
-            id: composition.id,
-            status: composition.status,
-            steps: JSON.parse(composition.steps || '[]'),
-            video_path: composition.video_path,
-            expiration_time: composition.expiration_time,
-            created_at: composition.created_at,
-            updated_at: composition.updated_at
-        });
-    } catch (error: any) {
-        console.error('[GET /api/videos/status/:id] Error al obtener estado:', error);
-        res.status(500).json({ error: 'Error interno al consultar el estado de la composición.' });
     }
-});
+);
+
+
 
 export const api_router_video = router;
 export default router;

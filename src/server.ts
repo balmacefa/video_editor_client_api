@@ -5,6 +5,7 @@ import path from 'path';
 import swaggerJSDoc from 'swagger-jsdoc';
 import swaggerUi from 'swagger-ui-express';
 import { api_router_audio } from './api/AudioAPI';
+import { startVideoCleanupScheduler } from './api/video_clean_up_data';
 import { api_router_video } from './api/VideoAPI';
 import { ENV } from './server/global_variables';
 
@@ -196,6 +197,8 @@ export const startServer = async () => {
         ENV.server_isReady = true;
         ENV.server_isHealthy = true;
     });
+
+    startVideoCleanupScheduler();
 
     return server;
 };
