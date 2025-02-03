@@ -80,7 +80,9 @@ const audioConversionSchema = Joi.object({
  * @swagger
  * /api/audio/convert-audio:
  *   post:
- *     tags: [Media]
+ *     security:
+ *       - BearerAuth: []
+ *     tags: [/api/audio]
  *     summary: Convierte un audio de un formato a otro
  *     description: Recibe un audio en base64, lo convierte al formato especificado y retorna el resultado
  *       ya sea en base64 o en data binaria, según se especifique en "returnType".
@@ -129,12 +131,7 @@ const audioConversionSchema = Joi.object({
  *             schema:
  *               type: string
  *               format: binary
- *       400:
- *         description: Error en la conversión del audio o error de validación.
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
+ * 
  */
 router.post(
     '/api/audio/convert-audio',

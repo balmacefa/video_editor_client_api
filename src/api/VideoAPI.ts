@@ -347,7 +347,7 @@ async function composeVideo(compositionData: any): Promise<string> {
  * @swagger
  * /api/videos/compose:
  *   post:
- *     tags: [Video Composition]
+ *     tags: [/api/video]
  *     summary: Componer video a partir de un JSON de composición
  *     description: >
  *       Recibe un JSON que describe la composición del video (incluye video, audio, texto e imágenes).
@@ -478,8 +478,6 @@ async function composeVideo(compositionData: any): Promise<string> {
  *                   type: string
  *                 message:
  *                   type: string
- *       400:
- *         description: Error en la composición o validación de datos.
  */
 router.post(
     '/api/videos/compose',

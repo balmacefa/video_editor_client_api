@@ -1,5 +1,5 @@
 {
-    "name": "whatsapp_web_client_api",
+    "name": "video_editor_api",
     "version": "1.0.4",
     "description": "Whatsapp Web Client API",
     "main": "src/index.ts",
