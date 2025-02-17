@@ -1,0 +1,1398 @@
+===== ./src/server/KnexDatabase.ts =====
+import Knex from 'knex';
+
+const filename =
+    process.env.NODE_ENV === 'test'
+        ? ':memory:'         // Use in-memory DB during tests
+        : './data/database.sqlite'; // Otherwise, use file-based DB
+
+const KnexDatabase = Knex({
+    client: 'sqlite3',
+    connection: {
+        filename,
+    },
+    useNullAsDefault: true,
+});
+
+export default KnexDatabase;
+
+===== ./src/server/global_variables.ts =====
+export const ENV = {
+    PORT: (process.env.PORT || 3000) as number,
+    HOST: process.env.HOST || 'localhost',
+    PROD_HOST: process.env['PROD_HOST'] || 'http://localhost:3000',
+    API_KEYS: (process.env.API_KEYS || 'secure_api_key,change_me').split(','),
+    server_isHealthy: false,
+    server_isReady: false,
+}
+
+===== ./src/server/process_exit_handlers.ts =====
+/** A possibly asynchronous function invoked with the process is about to exit. */
+export type CleanupListener = () => void | Promise<void>;
+
+let cleanupListeners: CleanupListener[] | undefined;
+// Change to target es5: "target": "es5"
+
+/** Registers a new cleanup listener. Adding the same listener more than once has no effect. */
+export function addCleanupListener(listener: CleanupListener): void {
+    // Install exit listeners on initial cleanup listener
+    if (!cleanupListeners) {
+        installExitListeners();
+        cleanupListeners = [];
+    }
+
+    // cleanupListeners.add(listener);
+    cleanupListeners.push(listener);
+}
+
+/** Removes an existing cleanup listener, and returns whether the listener was registered. */
+export function removeCleanupListener(listener: CleanupListener): boolean {
+    // return cleanupListeners != null && cleanupListeners.delete(listener);
+    return cleanupListeners != null && cleanupListeners.splice(cleanupListeners.indexOf(listener), 1).length > 0;
+}
+
+/** Executes all cleanup listeners and then exits the process. Call this instead of `process.exit` to ensure all listeners are fully executed. */
+export async function exitAfterCleanup(code = 0): Promise<never> {
+    await executeCleanupListeners();
+    process.exit(code);
+}
+
+/** Executes all cleanup listeners and then kills the process with the given signal. */
+export async function killAfterCleanup(signal: ExitSignal): Promise<void> {
+    await executeCleanupListeners();
+    process.kill(process.pid, signal);
+}
+
+async function executeCleanupListeners(): Promise<void> {
+    if (cleanupListeners) {
+        // Remove exit listeners to restore normal event handling
+        uninstallExitListeners();
+
+        // Clear cleanup listeners to reset state for testing
+        const listeners = cleanupListeners;
+        cleanupListeners = undefined;
+
+        // Call listeners in order added with async listeners running concurrently
+        const promises: Promise<void>[] = [];
+        for (const listener of listeners) {
+            try {
+                const promise = listener();
+                if (promise) promises.push(promise);
+            } catch (err) {
+                console.error("Uncaught exception during cleanup", err);
+            }
+        }
+
+        // Wait for all listeners to complete and log any rejections
+        const results = await Promise.allSettled(promises);
+        for (const result of results) {
+            if (result.status === "rejected") {
+                console.error("Unhandled rejection during cleanup", result.reason);
+            }
+        }
+    }
+}
+
+function beforeExitListener(code: number): void {
+    console.log(`Exiting with code ${code} due to empty event loop`);
+    void exitAfterCleanup(code);
+}
+
+function uncaughtExceptionListener(error: Error): void {
+    console.error("Exiting with code 1 due to uncaught exception", error);
+    void exitAfterCleanup(1);
+}
+
+function signalListener(signal: ExitSignal): void {
+    console.log(`Exiting due to signal ${signal}`);
+    void killAfterCleanup(signal);
+}
+
+// Listenable signals that terminate the process by default
+// (except SIGQUIT, which generates a core dump and should not trigger cleanup)
+// See https://nodejs.org/api/process.html#signal-events
+const listenedSignals = [
+    "SIGBREAK", // Ctrl-Break on Windows
+    "SIGHUP", // Parent terminal closed
+    "SIGINT", // Terminal interrupt, usually by Ctrl-C
+    "SIGTERM", // Graceful termination
+    "SIGUSR2", // Used by Nodemon
+] as const;
+
+/** Signals that can terminate the process. */
+export type ExitSignal =
+    | typeof listenedSignals[number]
+    | "SIGKILL"
+    | "SIGQUIT"
+    | "SIGSTOP";
+
+function installExitListeners(): void {
+    process.on("beforeExit", beforeExitListener);
+    process.on("uncaughtException", uncaughtExceptionListener);
+    listenedSignals.forEach((signal) => process.on(signal, signalListener));
+}
+
+function uninstallExitListeners(): void {
+    process.removeListener("beforeExit", beforeExitListener);
+    process.removeListener("uncaughtException", uncaughtExceptionListener);
+    listenedSignals.forEach((signal) =>
+        process.removeListener(signal, signalListener)
+    );
+}
+
+export const AddShutdown = (name: string, fn: () => Promise<void>) => {
+    console.log(`Adding shutdown function ${name}...`);
+    addCleanupListener(fn);
+}
+
+===== ./src/api/video_clean_up_data.ts =====
+import * as fs from 'fs';
+import KnexDatabase from "../server/KnexDatabase";
+import { initializeVideoCompositionTable } from './VideoAPI';
+
+
+// videoDataRouter.ts
+const db = KnexDatabase;
+
+
+// Intervalo de 15 minutos (en milisegundos)
+const CLEANUP_INTERVAL = 15 * 60 * 1000;
+
+async function cleanExpiredVideos(): Promise<void> {
+    try {
+        console.log(`[Cleanup] Programador iniciado. Iniciando limpieza de videos expirados... Ejecutando cada ${CLEANUP_INTERVAL / 60000} minutos.`);
+
+        // 0 . init the sqlite table
+        await initializeVideoCompositionTable();
+        // 1. Obtener registros con expiración pasada
+
+        const expiredRecords = await db('video_compositions')
+            .where('expiration_time', '<', db.fn.now())
+            .whereNotNull('video_path');
+
+        if (!expiredRecords.length) {
+            console.log('[Cleanup] No hay videos expirados para limpiar.');
+            return;
+        }
+
+        console.log(`[Cleanup] Encontrados ${expiredRecords.length} videos expirados.`);
+
+        // 2. Eliminar archivos físicos y actualizar BD
+        for (const record of expiredRecords) {
+            try {
+                if (fs.existsSync(record.video_path)) {
+                    await fs.promises.unlink(record.video_path);
+                    console.log(`[Cleanup] Video eliminado: ${record.video_path}`);
+                }
+            } catch (fileError) {
+                console.error(`[Cleanup] Error eliminando archivo ${record.video_path}:`, fileError);
+            }
+
+            // Actualizar registro
+            await db('video_compositions')
+                .where({ id: record.id })
+                .update({
+                    video_path: null,
+                    expiration_time: null
+                });
+        }
+
+        console.log('[Cleanup] Limpieza completada con éxito.');
+    } catch (error) {
+        console.error('[Cleanup] Error en proceso de limpieza:', error);
+        console.error('[Cleanup] Reintentando en 15 minutos:', error);
+    }
+}
+
+
+// Iniciar programador cuando el servidor arranque
+export function startVideoCleanupScheduler() {
+    // Ejecutar inmediatamente al inicio
+    cleanExpiredVideos();
+
+    // Programar ejecución periódica
+    setInterval(cleanExpiredVideos, CLEANUP_INTERVAL);
+}
+
+
+===== ./src/api/AudioAPI.ts =====
+import { celebrate, Joi, Segments } from 'celebrate';
+import { Request, Response, Router } from 'express';
+import ffmpegStatic from 'ffmpeg-static';
+import ffmpeg from 'fluent-ffmpeg';
+import { PassThrough } from 'stream';
+import { WritableStreamBuffer } from 'stream-buffers';
+import { apiKeyMiddleware } from './apiKeyMiddleware';
+
+ffmpeg.setFfmpegPath(ffmpegStatic);
+
+const router = Router();
+
+
+router.use(apiKeyMiddleware);
+
+
+/**
+ * Limpia el prefijo Data URL de una cadena base64.
+ * @param base64Data Cadena base64 (posiblemente con prefijo).
+ * @returns Cadena base64 sin prefijo.
+ */
+function cleanBase64Data(base64Data: string): string {
+    const regex = /^data:.*;base64,/;
+    return base64Data.replace(regex, '');
+}
+
+/**
+ * Función genérica para convertir audio de cualquier formato a otro.
+ * @param inputMimeType Mime type de la entrada.
+ * @param base64Data Cadena base64 del audio de entrada.
+ * @param outputFormat Formato de salida deseado (por ejemplo, "ogg", "mp3", "wav", etc.)
+ * @returns Promesa que resuelve con un Buffer con la data convertida.
+ */
+export async function convertAudio(
+    inputMimeType: string,
+    base64Data: string,
+    outputFormat: string
+): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+        const cleanedBase64 = cleanBase64Data(base64Data);
+        const inputBuffer = Buffer.from(cleanedBase64, 'base64');
+        if (inputBuffer.length === 0) {
+            return reject(new Error("El buffer de entrada está vacío. Verifica la cadena base64."));
+        }
+        const inputStream = new PassThrough();
+        inputStream.end(inputBuffer);
+
+        const outputBufferStream = new WritableStreamBuffer();
+
+        const command = ffmpeg(inputStream)
+            .format(outputFormat);
+
+        command
+            .on('error', (err) => {
+                reject(new Error(`Error en la conversión con FFmpeg: ${err.message}`));
+            })
+            .on('end', () => {
+                const outputBuffer = outputBufferStream.getContents();
+                if (!outputBuffer) {
+                    return reject(new Error('No se obtuvo resultado de la conversión.'));
+                }
+                resolve(outputBuffer);
+            })
+            .pipe(outputBufferStream, { end: true });
+    });
+}
+
+/**
+ * Esquema Joi para validar la petición de conversión de audio.
+ * Se acepta:
+ *  - inputMimeType: mimetype del audio de entrada.
+ *  - audioBase64: cadena base64 del audio.
+ *  - outputFormat: formato de salida deseado.
+ *  - returnType: "base64" o "binary"
+ */
+const audioConversionSchema = Joi.object({
+    inputMimeType: Joi.string().required(),
+    audioBase64: Joi.string().required(),
+    outputFormat: Joi.string().required(),
+    returnType: Joi.string().valid("base64", "binary").required()
+});
+
+
+/**
+ * @swagger
+ * /api/audio/convert-audio:
+ *   post:
+ *     security:
+ *       - BearerAuth: []
+ *     tags: [/api/audio]
+ *     summary: Convierte un audio de un formato a otro
+ *     description: Recibe un audio en base64, lo convierte al formato especificado y retorna el resultado
+ *       ya sea en base64 o en data binaria, según se especifique en "returnType".
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               inputMimeType:
+ *                 type: string
+ *                 description: Tipo MIME del audio de entrada.
+ *                 example: "audio/wav"
+ *               audioBase64:
+ *                 type: string
+ *                 description: Audio codificado en base64.
+ *                 example: "UklGRigAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA="
+ *               outputFormat:
+ *                 type: string
+ *                 description: Formato de salida deseado para el audio.
+ *                 example: "mp3"
+ *               returnType:
+ *                 type: string
+ *                 description: Indica si se retorna el audio en base64 o en data binaria.
+ *                 enum: [base64, binary]
+ *                 example: "base64"
+ *     responses:
+ *       200:
+ *         description: Audio convertido exitosamente.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: "success"
+ *                 convertedAudioBase64:
+ *                   type: string
+ *                   description: Audio convertido en base64 (si se eligió "base64").
+ *                 message:
+ *                   type: string
+ *                   description: Mensaje de confirmación.
+ *           application/octet-stream:
+ *             schema:
+ *               type: string
+ *               format: binary
+ * 
+ */
+router.post(
+    '/api/audio/convert-audio',
+    celebrate({
+        [Segments.BODY]: audioConversionSchema
+    }),
+    async (req: Request, res: Response) => {
+        try {
+            const { inputMimeType, audioBase64, outputFormat, returnType } = req.body;
+            const convertedBuffer = await convertAudio(inputMimeType, audioBase64, outputFormat);
+
+            if (returnType === "base64") {
+                const convertedBase64 = convertedBuffer.toString('base64');
+                res.status(200).json({
+                    status: "success",
+                    convertedAudioBase64: convertedBase64,
+                    message: `Audio convertido a ${outputFormat} exitosamente`
+                });
+            } else {
+                // Si se solicita binario, se envía el buffer directamente.
+                res.set('Content-Type', `audio/${outputFormat}`);
+                res.status(200).send(convertedBuffer);
+            }
+        } catch (error: any) {
+            res.status(400).json({ error: error.message });
+        }
+    }
+);
+
+export const api_router_audio = router;
+export default router;
+
+===== ./src/api/VideoAPI.ts =====
+// videoDataRouter.ts
+import { celebrate, Segments } from 'celebrate';
+import crypto from 'crypto';
+import { Request, Response, Router } from 'express';
+import ffmpegStatic from 'ffmpeg-static';
+import ffmpeg from 'fluent-ffmpeg';
+import fs from 'fs';
+import Joi from 'joi';
+import path from 'path';
+import KnexDatabase from '../server/KnexDatabase';
+import { apiKeyMiddleware } from './apiKeyMiddleware';
+
+ffmpeg.setFfmpegPath(ffmpegStatic);
+
+const db = KnexDatabase;
+const router = Router();
+
+router.use(apiKeyMiddleware);
+
+/**
+ * Inicializa la tabla "video_compositions" si no existe.
+ * 
+ * - En esta función no tenemos un `id` de composición (porque se llama antes de crear el registro);
+ *   por lo tanto, en caso de error, no se puede registrar en "steps" de la BD.
+ * - Sin embargo, sí registramos logs y lanzamos la excepción para que sea manejada
+ *   posteriormente (p.ej., en la ruta que la invoque).
+ */
+export async function initializeVideoCompositionTable(): Promise<void> {
+    try {
+        const exists = await db.schema.hasTable('video_compositions');
+        if (!exists) {
+            console.log('[DB] Creando tabla "video_compositions"...');
+            await db.schema.createTable('video_compositions', (table) => {
+                table.string('id').primary();
+                table.string('status').notNullable();
+                table.json('steps').defaultTo(JSON.stringify([]));
+                table.string('folder_path').notNullable();
+                table.string('video_path').nullable();
+                table.timestamp('expiration_time').nullable().index(); // Agregar índice
+                table.timestamps(true, true);
+            });
+            console.log('[DB] Tabla "video_compositions" creada con éxito.');
+        }
+    } catch (error) {
+        console.error('[DB] Error al inicializar la tabla "video_compositions":', error);
+        throw error; // se re-lanza el error para que lo maneje quien llame a esta función
+    }
+}
+
+/**
+ * Crea el registro inicial para el proceso de composición en la tabla "video_compositions".
+ * Retorna los pasos actualizados en caso de éxito, para que podamos seguir agregando.
+ */
+async function createVideoCompositionRecord(record: {
+    id: string;
+    status: string;
+    steps?: string[];
+    folder_path: string;
+}): Promise<string[]> {
+    try {
+        const steps = record.steps || [];
+        await db('video_compositions').insert({
+            ...record,
+            steps: JSON.stringify(steps)
+        });
+        console.log(`[DB] Registro de composición creado. ID: ${record.id}, status: ${record.status}`);
+        return steps;
+    } catch (error) {
+        console.error('[DB] Error al crear registro de composición:', error);
+        throw error;
+    }
+}
+
+/**
+ * Lee el registro actual de "video_compositions" para obtener la lista de steps,
+ * y devuelve ese array (o uno vacío si no existe).
+ */
+async function getCurrentSteps(id: string): Promise<string[]> {
+    try {
+        const row = await db('video_compositions').where({ id }).first();
+        if (row) {
+            return JSON.parse(row.steps || '[]');
+        }
+        return [];
+    } catch (error) {
+        console.error(`[DB] Error al obtener steps para ID: ${id}`, error);
+        return [];
+    }
+}
+
+/**
+ * Actualiza el registro del proceso de composición.
+ * - `updates.steps`: si se provee, se convertirá a JSON tras recuperar los steps actuales.
+ */
+async function updateVideoCompositionProgress(
+    id: string,
+    updates: Partial<{
+        status: string;
+        steps: string[];
+        video_path: string;
+        expiration_time: Date;
+    }>
+): Promise<void> {
+    try {
+        const currentSteps = await getCurrentSteps(id);
+        let mergedSteps = currentSteps;
+        if (updates.steps && updates.steps.length > 0) {
+            // merge steps: concatenar sin duplicar
+            mergedSteps = currentSteps.concat(updates.steps);
+        }
+
+        const updateData: any = {
+            ...updates,
+            steps: JSON.stringify(mergedSteps),
+            updated_at: db.fn.now()
+        };
+
+        await db('video_compositions').where({ id }).update(updateData);
+        console.log(`[DB] Registro de composición actualizado. ID: ${id}, Updates:`, updates);
+    } catch (error) {
+        console.error('[DB] Error al actualizar registro de composición:', error);
+        throw error;
+    }
+}
+
+/**
+ * Esquema de validación para la nueva estructura de composición de video.
+ * Recibe:
+ *  - assets[]: { id, type, source, aspecs... }
+ *  - timeline[]: { assetId, startTime, override... }
+ *  - globalSettings: { resolution, outputFormat }
+ */
+const videoCompositionSchema = Joi.object({
+    assets: Joi.array()
+        .items(
+            Joi.object({
+                id: Joi.string().required(),
+                type: Joi.string().valid('video', 'audio', 'text', 'image').required(),
+                source: Joi.object({
+                    url: Joi.string().uri().optional(),
+                    data_base64: Joi.string().optional(),
+                    content: Joi.string().optional()
+                }).required(),
+                aspecs: Joi.object({
+                    startTrim: Joi.number().default(0),
+                    duration: Joi.number().required(),
+                    resolution: Joi.object({
+                        width: Joi.number().required(),
+                        height: Joi.number().required()
+                    }).optional(),
+                    position: Joi.object({
+                        x: Joi.number().required(),
+                        y: Joi.number().required()
+                    }).optional(),
+                    effects: Joi.object({
+                        transitionIn: Joi.object({
+                            type: Joi.string().valid('fade', 'slide').optional(),
+                            duration: Joi.number().optional()
+                        }).optional(),
+                        transitionOut: Joi.object({
+                            type: Joi.string().valid('fade', 'slide').optional(),
+                            duration: Joi.number().optional()
+                        }).optional(),
+                        animation: Joi.string().optional(),
+                        speed: Joi.number().optional()
+                    }).optional(),
+                    volume: Joi.number().optional(),
+                    font: Joi.string().optional(),
+                    fontSize: Joi.number().optional(),
+                    color: Joi.string().optional()
+                }).required()
+            })
+        )
+        .required(),
+
+    timeline: Joi.array()
+        .items(
+            Joi.object({
+                assetId: Joi.string().required(),
+                startTime: Joi.number().required(),
+                override: Joi.object({
+                    position: Joi.object({
+                        x: Joi.number(),
+                        y: Joi.number()
+                    }).optional(),
+                    effects: Joi.object({
+                        transitionIn: Joi.object({
+                            type: Joi.string().valid('fade', 'slide').optional(),
+                            duration: Joi.number().optional()
+                        }).optional(),
+                        transitionOut: Joi.object({
+                            type: Joi.string().valid('fade', 'slide').optional(),
+                            duration: Joi.number().optional()
+                        }).optional(),
+                        animation: Joi.string().optional(),
+                        speed: Joi.number().optional()
+                    }).optional()
+                }).optional()
+            })
+        )
+        .required(),
+
+    globalSettings: Joi.object({
+        resolution: Joi.object({
+            width: Joi.number().required(),
+            height: Joi.number().required()
+        }).required(),
+        outputFormat: Joi.string().valid('mp4', 'mov').default('mp4')
+    }).required()
+});
+
+/**
+ * Transforma la data (assets/timeline/globalSettings) en un arreglo
+ * simplificado de clips (solo video/audio) para trim+concat con ffmpeg.
+ * Se añade try/catch interno para capturar fallos potenciales.
+ */
+function transformToConcatClips(assets: any[], timeline: any[], globalSettings: any) {
+    try {
+        console.log('[transformToConcatClips] Iniciando transformación de datos para ffmpeg.');
+
+        const sortedTimeline = [...timeline].sort((a, b) => a.startTime - b.startTime);
+
+        const clips: Array<{
+            src: string;
+            start: number;
+            duration: number;
+        }> = [];
+
+        for (const item of sortedTimeline) {
+            const asset = assets.find((a) => a.id === item.assetId);
+            if (!asset) {
+                console.warn(`[transformToConcatClips] No se encontró el asset con id: ${item.assetId}. Se omitirá.`);
+                continue;
+            }
+
+            if (asset.type === 'video' || asset.type === 'audio') {
+                const startTrimMs = asset.aspecs.startTrim ?? 0;
+                const durationMs = asset.aspecs.duration;
+                const startSeconds = startTrimMs / 1000;
+                const durationSeconds = durationMs / 1000;
+
+                // Solo lo agregamos si existe una URL
+                if (asset.source?.url) {
+                    clips.push({
+                        src: asset.source.url,
+                        start: startSeconds,
+                        duration: durationSeconds
+                    });
+                    console.log(
+                        `[transformToConcatClips] Clip agregado: ${asset.type} | src=${asset.source.url} | start=${startSeconds}s | duration=${durationSeconds}s.`
+                    );
+                } else {
+                    console.warn(
+                        `[transformToConcatClips] El asset ${asset.id} no tiene 'source.url'. No se agregará al proceso.`
+                    );
+                }
+            } else {
+                console.log(`[transformToConcatClips] Ignorando asset de tipo ${asset.type}. (Se requiere lógica overlay)`);
+            }
+        }
+
+        // Retornamos el objeto con la lista de clips y el formato
+        return {
+            clips,
+            outputFormat: globalSettings.outputFormat
+        };
+    } catch (error) {
+        console.error('[transformToConcatClips] Error al transformar datos:', error);
+        throw error;
+    }
+}
+
+/**
+ * Usa ffmpeg para hacer trim y concat de un conjunto de clips (video/audio).
+ * Retorna la ruta del archivo generado.
+ * Se maneja try/catch a nivel de promesa, y se propaga el error si ocurre.
+ */
+async function composeVideo(compositionData: any): Promise<string> {
+    try {
+        console.log('[composeVideo] Iniciando proceso de composición con ffmpeg.');
+
+        const composedDir = path.join(process.cwd(), 'data', 'composedVideos');
+        if (!fs.existsSync(composedDir)) {
+            fs.mkdirSync(composedDir, { recursive: true });
+            console.log(`[composeVideo] Creada carpeta para videos compuestos: ${composedDir}`);
+        }
+
+        const outputFilename = `video-${Date.now()}.${compositionData.outputFormat}`;
+        const outputPath = path.join(composedDir, outputFilename);
+
+        // Construcción del filtro complejo para trim y concat
+        const filterInputs: string[] = [];
+        compositionData.clips.forEach((clip: any, index: number) => {
+            filterInputs.push(
+                `[${index}:v]trim=start=${clip.start}:duration=${clip.duration},setpts=PTS-STARTPTS[v${index}]`
+            );
+            filterInputs.push(
+                `[${index}:a]atrim=start=${clip.start}:duration=${clip.duration},asetpts=PTS-STARTPTS[a${index}]`
+            );
+        });
+
+        let videoStreams = '';
+        let audioStreams = '';
+        for (let i = 0; i < compositionData.clips.length; i++) {
+            videoStreams += `[v${i}]`;
+            audioStreams += `[a${i}]`;
+        }
+
+        const concatFilter = `${videoStreams}${audioStreams}concat=n=${compositionData.clips.length}:v=1:a=1[outv][outa]`;
+        const fullFilter = [...filterInputs, concatFilter].join(';');
+
+        console.log('[composeVideo] Filtro ffmpeg:', fullFilter);
+        console.log('[composeVideo] Generando archivo de salida en:', outputPath);
+
+        // Retornamos una promesa que se resuelve cuando ffmpeg termina
+        return await new Promise((resolve, reject) => {
+            const command = ffmpeg();
+
+            compositionData.clips.forEach((clip: any) => {
+                command.input(clip.src);
+            });
+
+            command
+                .complexFilter(fullFilter, ['outv', 'outa'])
+                .outputOptions('-map', '[outv]', '-map', '[outa]')
+                .output(outputPath)
+                .on('start', () => {
+                    console.log('[composeVideo] ffmpeg proceso iniciado...');
+                })
+                .on('progress', (progress) => {
+                    console.log(`[composeVideo] Progreso: ${Math.floor(progress.percent || 0)}% (frame=${progress.frames})`);
+                })
+                .on('end', () => {
+                    console.log('[composeVideo] ffmpeg proceso finalizado. Video disponible en:', outputPath);
+                    resolve(outputPath);
+                })
+                .on('error', (err: Error) => {
+                    console.error('[composeVideo] Error en ffmpeg:', err);
+                    reject(err);
+                })
+                .run();
+        });
+    } catch (error) {
+        console.error('[composeVideo] Error general antes de iniciar ffmpeg:', error);
+        throw error;
+    }
+}
+
+/**
+ * @swagger
+ * /api/videos/compose:
+ *   post:
+ *     tags: [/api/video]
+ *     summary: Componer video a partir de un JSON de composición
+ *     description: >
+ *       Recibe un JSON que describe la composición del video (incluye video, audio, texto e imágenes).
+ *       Actualmente, el sistema solo concatena y recorta (trim) recursos de tipo video/audio,
+ *       registrando el proceso en la base de datos y devolviendo la ruta del video final.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               assets:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     id:
+ *                       type: string
+ *                     type:
+ *                       type: string
+ *                       enum: [video, audio, text, image]
+ *                     source:
+ *                       type: object
+ *                       properties:
+ *                         url:
+ *                           type: string
+ *                           format: uri
+ *                         data_base64:
+ *                           type: string
+ *                         content:
+ *                           type: string
+ *                     aspecs:
+ *                       type: object
+ *                       properties:
+ *                         startTrim:
+ *                           type: number
+ *                         duration:
+ *                           type: number
+ *                         resolution:
+ *                           type: object
+ *                           properties:
+ *                             width:
+ *                               type: number
+ *                             height:
+ *                               type: number
+ *                         position:
+ *                           type: object
+ *                           properties:
+ *                             x:
+ *                               type: number
+ *                             y:
+ *                               type: number
+ *                         effects:
+ *                           type: object
+ *                           properties:
+ *                             transitionIn:
+ *                               type: object
+ *                             transitionOut:
+ *                               type: object
+ *                             animation:
+ *                               type: string
+ *                             speed:
+ *                               type: number
+ *                         volume:
+ *                           type: number
+ *                         font:
+ *                           type: string
+ *                         fontSize:
+ *                           type: number
+ *                         color:
+ *                           type: string
+ *               timeline:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     assetId:
+ *                       type: string
+ *                     startTime:
+ *                       type: number
+ *                     override:
+ *                       type: object
+ *                       properties:
+ *                         position:
+ *                           type: object
+ *                           properties:
+ *                             x:
+ *                               type: number
+ *                             y:
+ *                               type: number
+ *                         effects:
+ *                           type: object
+ *                           properties:
+ *                             transitionIn:
+ *                               type: object
+ *                             transitionOut:
+ *                               type: object
+ *                             animation:
+ *                               type: string
+ *                             speed:
+ *                               type: number
+ *               globalSettings:
+ *                 type: object
+ *                 properties:
+ *                   resolution:
+ *                     type: object
+ *                     properties:
+ *                       width:
+ *                         type: number
+ *                       height:
+ *                         type: number
+ *                   outputFormat:
+ *                     type: string
+ *                     enum: [mp4, mov]
+ *                     default: mp4
+ *     responses:
+ *       200:
+ *         description: Video generado exitosamente.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                 outputPath:
+ *                   type: string
+ *                 message:
+ *                   type: string
+ */
+router.post(
+    '/api/videos/compose',
+    celebrate({
+        [Segments.BODY]: videoCompositionSchema
+    }),
+    async (req: Request, res: Response): Promise<any> => {
+        let requestId = '';
+        try {
+            console.log('[POST /api/videos/compose] Solicitud de composición recibida.');
+
+            // 1) Inicializar tabla (si no existe)
+            try {
+                await initializeVideoCompositionTable();
+                console.log('[POST /api/videos/compose] Step: "table_initialization_success".');
+            } catch (tableError) {
+                console.error('[POST /api/videos/compose] Step: "table_initialization_failure".', tableError);
+                return res.status(500).json({
+                    status: 'error',
+                    message: 'No se pudo inicializar la tabla de composiciones.',
+                    error: tableError.message
+                });
+            }
+
+            // 2) Generar ID único para la composición
+            requestId = crypto.randomBytes(16).toString('hex');
+
+            // 3) Crear carpeta para almacenar assets/resultado
+            const folderPath = path.join(process.cwd(), 'data', 'composeVideo', requestId);
+            try {
+                fs.mkdirSync(folderPath, { recursive: true });
+                console.log('[POST /api/videos/compose] Step: "folder_creation_success".');
+            } catch (mkError) {
+                console.error('[POST /api/videos/compose] Step: "folder_creation_failure".', mkError);
+                return res.status(500).json({
+                    status: 'error',
+                    message: 'No se pudo crear la carpeta de almacenamiento de composición.',
+                    error: mkError.message
+                });
+            }
+
+            // 4) Crear registro inicial en la BD
+            let stepsInDb: string[] = [];
+            try {
+                stepsInDb = await createVideoCompositionRecord({
+                    id: requestId,
+                    status: 'in_progress',
+                    steps: ['record_creation_success'],
+                    folder_path: folderPath
+                });
+            } catch (recordError) {
+                console.error('[POST /api/videos/compose] Step: "record_creation_failure".', recordError);
+                return res.status(500).json({
+                    status: 'error',
+                    message: 'No se pudo crear el registro de la composición en la BD.',
+                    error: recordError.message
+                });
+            }
+
+            // 5) Transformar data (assets/timeline/globalSettings)
+            const { assets, timeline, globalSettings } = req.body;
+            let concatData: { clips: any[]; outputFormat: string };
+            try {
+                concatData = transformToConcatClips(assets, timeline, globalSettings);
+                // Actualizar steps con "transform_clips_success"
+                await updateVideoCompositionProgress(requestId, {
+                    steps: ['transform_clips_success']
+                });
+            } catch (transformError) {
+                console.error('[POST /api/videos/compose] Step: "transform_clips_failure".', transformError);
+                await updateVideoCompositionProgress(requestId, {
+                    status: 'failed',
+                    steps: ['transform_clips_failure']
+                });
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Ocurrió un error al transformar los datos de composición.',
+                    error: transformError.message
+                });
+            }
+
+            // Verificamos que haya clips de video/audio
+            if (!concatData.clips.length) {
+                const noClipsError = 'No se encontraron clips de video/audio para procesar.';
+                console.error('[POST /api/videos/compose]', noClipsError);
+                await updateVideoCompositionProgress(requestId, {
+                    status: 'failed',
+                    steps: ['no_valid_clips_found']
+                });
+                return res.status(400).json({
+                    status: 'error',
+                    message: noClipsError
+                });
+            }
+
+            // 6) Componer video (trim+concat)
+            let outputPath: string;
+            try {
+                outputPath = await composeVideo(concatData);
+
+                // Actualizar steps con "compose_video_success"
+                await updateVideoCompositionProgress(requestId, {
+                    steps: ['compose_video_success']
+                });
+            } catch (composeErr) {
+                console.error('[POST /api/videos/compose] Step: "compose_video_failure".', composeErr);
+                await updateVideoCompositionProgress(requestId, {
+                    status: 'failed',
+                    steps: ['compose_video_failure']
+                });
+                return res.status(400).json({
+                    status: 'error',
+                    message: 'Ocurrió un error al componer el video con ffmpeg.',
+                    error: composeErr.message
+                });
+            }
+
+            // 7) Marcar como "completed"
+            try {
+                await updateVideoCompositionProgress(requestId, {
+                    status: 'completed',
+                    steps: ['video_composed'],
+                    video_path: outputPath,
+                    expiration_time: new Date(Date.now() + 60 * 60 * 1000) // 1 hora
+                });
+            } catch (updateError) {
+                console.error('[POST /api/videos/compose] Step: "update_composition_failure".', updateError);
+                // No retornamos aquí, solo loggeamos, porque el video ya se compuso con éxito.
+            }
+
+            console.log(`[POST /api/videos/compose] Proceso de composición completado (ID: ${requestId}).`);
+            res.status(200).json({
+                status: 'success',
+                outputPath,
+                message: 'Vídeo generado exitosamente'
+            });
+        } catch (error: any) {
+            console.error(`[POST /api/videos/compose] Error general en la ruta de composición (ID: ${requestId}):`, error);
+
+            // Si tenemos un ID, intentamos actualizar el estado a "failed"
+            if (requestId) {
+                try {
+                    await updateVideoCompositionProgress(requestId, {
+                        status: 'failed',
+                        steps: ['failed_in_general_catch']
+                    });
+                } catch (dbError) {
+                    console.error('[POST /api/videos/compose] Error al actualizar BD tras fallo general:', dbError);
+                }
+            }
+
+            res.status(400).json({
+                status: 'error',
+                message: error.message || 'Error desconocido en la composición de video.'
+            });
+        }
+    }
+);
+
+
+/**
+ * @swagger
+ * /api/videos/status:
+ *   post:
+ *     tags: [/api/video]
+ *     summary: Consultar el estado de una composición de video
+ *     description: Recibe un ID y devuelve el estado actual de la composición, incluyendo los pasos completados y la ruta del video si está disponible.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               id:
+ *                 type: string
+ *                 description: ID único de la composición de video
+ *             required:
+ *               - id
+ *     responses:
+ *       200:
+ *         description: Estado de la composición obtenido exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *                 steps:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                 video_path:
+ *                   type: string
+ *                 expiration_time:
+ *                   type: string
+ *                   format: date-time
+ *                 created_at:
+ *                   type: string
+ *                   format: date-time
+ *                 updated_at:
+ *                   type: string
+ *                   format: date-time
+ *       404:
+ *         description: No se encontró la composición con el ID proporcionado
+ *       500:
+ *         description: Error interno al consultar el estado
+ */
+router.post(
+    '/api/videos/status',
+    celebrate({
+        [Segments.BODY]: Joi.object({
+            id: Joi.string().required()
+        })
+    }),
+    async (req: Request, res: Response): Promise<any> => {
+        const { id } = req.body;
+        try {
+            console.log(`[POST /api/videos/status] Consultando estado de la composición ID: ${id}.`);
+
+            const composition = await db('video_compositions').where({ id }).first();
+            if (!composition) {
+                return res.status(404).json({ error: 'No existe una composición con ese ID.' });
+            }
+
+            res.json({
+                id: composition.id,
+                status: composition.status,
+                steps: JSON.parse(composition.steps || '[]'),
+                video_path: composition.video_path,
+                expiration_time: composition.expiration_time,
+                created_at: composition.created_at,
+                updated_at: composition.updated_at
+            });
+        } catch (error: any) {
+            console.error('[POST /api/videos/status] Error al obtener estado:', error);
+            res.status(500).json({ error: 'Error interno al consultar el estado de la composición.' });
+        }
+    }
+);
+
+
+
+export const api_router_video = router;
+export default router;
+
+===== ./src/api/apiKeyMiddleware.ts =====
+import { NextFunction, Request, Response } from 'express';
+import { ENV } from '../server/global_variables';
+
+/**
+ * @swagger
+ * components:
+ *   securitySchemes:
+ *     BearerAuth:
+ *       type: http
+ *       scheme: bearer
+ *       bearerFormat: JWT
+ */
+
+
+/**
+ * Middleware to validate API Key using the Authorization header.
+ * Expected format: Authorization: Bearer <API_KEY>
+ */
+export const apiKeyMiddleware = (req: Request, res: Response, next: NextFunction) => {
+    const authHeader = req.header('Authorization');
+
+    if (!authHeader) {
+        res.status(401).json({ error: 'Authorization header missing' });
+        return;
+    }
+
+    const parts = authHeader.split(' ');
+
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+        res.status(400).json({ error: 'Invalid Authorization header format. Format should be "Bearer <API_KEY>"' });
+        return;
+    }
+
+    const apiKey = parts[1];
+
+    if (!ENV.API_KEYS.includes(apiKey)) {
+        res.status(403).json({ error: 'Invalid API key' });
+        return;
+    }
+
+    next();
+};
+
+===== ./src/server.ts =====
+import cors from 'cors';
+import express from 'express';
+import { readFileSync } from "fs";
+import path from 'path';
+import swaggerJSDoc from 'swagger-jsdoc';
+import swaggerUi from 'swagger-ui-express';
+import { api_router_audio } from './api/AudioAPI';
+import { startVideoCleanupScheduler } from './api/video_clean_up_data';
+import { api_router_video } from './api/VideoAPI';
+import { ENV } from './server/global_variables';
+
+
+
+const executionPath = process.cwd();
+const packageJsonPath = path.join(executionPath, 'package.json');
+const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8"));
+
+const swaggerOptions: swaggerJSDoc.Options = {
+    definition: {
+        openapi: '3.0.0',
+        info: {
+            title: 'Multimedia Processing API',
+            version: packageJson.version,
+            description: 'API profesional para conversión y composición multimedia',
+        },
+        servers: [{ url: ENV.PROD_HOST }],
+        tags: [
+        ],
+    },
+    apis: ['./src/api/**/*'], // Path to the API routes
+};
+
+
+
+export const createApp = async () => {
+    const app = express();
+
+    // Middleware
+    app.use(cors());
+    // Middleware
+    app.use(cors());
+    // Aumentamos el límite de la petición para JSON y urlencoded
+    app.use(express.json({ limit: '50mb' }));
+    app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+
+
+
+    // Swagger setup
+    const swaggerSpec = swaggerJSDoc(swaggerOptions);
+    app.use('/swagger', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+
+
+    app.get('/', (req, res) => {
+        res.send(
+            `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Multimedia Processing API</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    </head>
+    <body class="bg-light">
+        <div class="container py-5">
+            <div class="text-center mb-5">
+                <h1 class="display-4 mb-3 fw-bold text-primary">
+                    <i class="bi bi-file-earmark-play"></i> Multimedia Processing API
+                </h1>
+                <p class="lead fs-4">Versión: ${packageJson.version}</p>
+                <p class="text-muted">API profesional para conversión y composición multimedia</p>
+            </div>
+
+            <div class="row g-4">
+                <!-- Sección Audio -->
+                <div class="col-md-6">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header bg-primary text-white">
+                            <h3 class="mb-0"><i class="bi bi-file-earmark-music"></i> Audio Processing</h3>
+                        </div>
+                        <div class="card-body">
+                            <h5 class="mb-3">Conversión de Formatos</h5>
+                            <ul class="list-unstyled ms-4">
+                                <li><i class="bi bi-arrow-repeat"></i> Formatos soportados: MP3, WAV, AAC, FLAC</li>
+                                <li><i class="bi bi-file-arrow-down"></i> Entrada/Salida en Base64 o Binario</li>
+                                <li><i class="bi bi-lightning-charge"></i> Conversión en tiempo real</li>
+                                <li><i class="bi bi-shield-check"></i> Validación de formatos</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Sección Video -->
+                <div class="col-md-6">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header bg-success text-white">
+                            <h3 class="mb-0"><i class="bi bi-film"></i> Video Composition</h3>
+                        </div>
+                        <div class="card-body">
+                            <h5 class="mb-3">Edición Programática</h5>
+                            <ul class="list-unstyled ms-4">
+                                <li><i class="bi bi-puzzle"></i> Composición mediante JSON</li>
+                                <li><i class="bi bi-scissors"></i> Recorte y concatenación</li>
+                                <li><i class="bi bi-sliders"></i> Transiciones y efectos</li>
+                                <li><i class="bi bi-gear-wide-connected"></i> Ajuste de resolución</li>
+                                <li><i class="bi bi-layers"></i> Superposición de elementos</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sección Características Generales -->
+            <div class="row mt-4 g-4">
+                <div class="col-md-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header bg-info text-white">
+                            <h5><i class="bi bi-cpu"></i> Core Features</h5>
+                        </div>
+                        <div class="card-body">
+                            <ul class="list-unstyled">
+                                <li><i class="bi bi-check2-circle"></i> RESTful Design</li>
+                                <li><i class="bi bi-clock-history"></i> Procesamiento Asincrónico</li>
+                                <li><i class="bi bi-shield-lock"></i> Autenticación JWT</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-md-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header bg-warning text-dark">
+                            <h5><i class="bi bi-input-cursor"></i> Input/Output</h5>
+                        </div>
+                        <div class="card-body">
+                            <ul class="list-unstyled">
+                                <li><i class="bi bi-file-code"></i> JSON API</li>
+                                <li><i class="bi bi-file-binary"></i> Soporte Base64</li>
+                                <li><i class="bi bi-database"></i> Almacenamiento temporal</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-md-4">
+                    <div class="card h-100 shadow-sm">
+                        <div class="card-header bg-danger text-white">
+                            <h5><i class="bi bi-tools"></i> Tecnologías</h5>
+                        </div>
+                        <div class="card-body">
+                            <ul class="list-unstyled">
+                                <li><i class="bi bi-code-square"></i> Node.js/Express</li>
+                                <li><i class="bi bi-gear"></i> FFmpeg Integration</li>
+                                <li><i class="bi bi-box-seam"></i> Docker Support</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Documentación -->
+            <div class="text-center mt-5">
+                <div class="card shadow-sm">
+                    <div class="card-body">
+                        <h3 class="mb-4"><i class="bi bi-book"></i> API Documentation</h3>
+                        <p class="text-muted mb-4">Explore endpoints interactivos y especificaciones técnicas</p>
+                        <a href="/swagger" class="btn btn-lg btn-dark">
+                            <i class="bi bi-file-earmark-code"></i> Swagger UI
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    </body>
+    </html>
+    `);
+    });
+    // Define routes
+    // defineRoutes(app);
+
+
+    app.use('/', api_router_audio);
+    app.use('/', api_router_video);
+    // api_router_audio(app)
+
+    return app;
+};
+
+export const startServer = async () => {
+    const app = await createApp();
+    const server = app.listen(ENV.PORT, () => {
+        console.log(`Server running on http://${ENV.HOST}:${ENV.PORT}`);
+        ENV.server_isReady = true;
+        ENV.server_isHealthy = true;
+    });
+
+    startVideoCleanupScheduler();
+
+    return server;
+};
+===== ./src/index.ts =====
+import { createHttpTerminator } from 'http-terminator';
+import { startServer } from './server';
+import { AddShutdown } from './server/process_exit_handlers';
+
+async function main() {
+    const server = await startServer();
+
+    const httpTerminator = createHttpTerminator({
+        server,
+    });
+
+    // Add hook for graceful shutdown
+    AddShutdown('Express connections', async () => {
+        console.log(
+            'No longer accepting new requests. Waiting for pending requests to finish before shutting down the server.'
+        );
+        await httpTerminator.terminate();
+        console.log('All pending requests have finished. Shutting down the server...');
+    });
+}
+
+if (require.main === module) {
+    (async () => {
+        await main();
+    })();
+}

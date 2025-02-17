@@ -1,7 +1,7 @@
 {
     "name": "video_editor_api",
     "version": "1.0.4",
-    "description": "Whatsapp Web Client API",
+    "description": "video_editor_api Web Client API",
     "main": "src/index.ts",
     "scripts": {
         "start": "node -r @swc-node/register src/index.ts",
@@ -15,6 +15,7 @@
         "@swc/jest": "^0.2.36",
         "@types/jest": "^29.5.12",
         "@types/knex": "^0.15.2",
+        "@types/uuid": "^10.0.0",
         "jest": "^29.7.0",
         "nodemon": "^3.1.9"
     },
@@ -36,6 +37,7 @@
         "stream-buffers": "^3.0.3",
         "swagger-jsdoc": "^6.2.8",
         "swagger-ui-express": "^5.0.1",
+        "uuid": "^11.0.5",
         "zod": "^3.24.1"
     }
 }

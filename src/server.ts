@@ -8,6 +8,7 @@ import { api_router_audio } from './api/AudioAPI';
 import { startVideoCleanupScheduler } from './api/video_clean_up_data';
 import { api_router_video } from './api/VideoAPI';
 import { ENV } from './server/global_variables';
+import { single_api } from './api/SingleApi';
 
 
 
@@ -185,6 +186,7 @@ export const createApp = async () => {
 
     app.use('/', api_router_audio);
     app.use('/', api_router_video);
+    app.use('/', single_api);
     // api_router_audio(app)
 
     return app;
