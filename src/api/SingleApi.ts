@@ -1,4 +1,93 @@
-// src/api/SingleApi.ts
+/**
+ * @swagger
+ * /single_api:
+ *   post:
+ *     summary: Compila un video secuencial
+ *     description: |
+ *       Este endpoint recibe un objeto JSON con el tipo "compile_sequential_video" y un array de segmentos. 
+ *       Cada segmento debe incluir:
+ *         - **base_64**: Cadena codificada en base64 del video o audio.
+ *         - **type**: Indica el tipo de segmento, que puede ser:
+ *             - **video**: Actualiza el video activo que se usará en los siguientes segmentos.
+ *             - **tts**: Representa audio (TTS) que se sobrepone al video activo.
+ *         - **content**: Texto descriptivo o transcripción, en caso de ser TTS.
+ *         - **id**: Número que determina el orden de los segmentos.
+ *       El proceso consiste en:
+ *         1. Procesar los segmentos en orden (según el campo **id**).
+ *         2. Actualizar el video activo al encontrar un segmento de tipo "video".
+ *         3. Combinar el audio TTS del segmento con el video activo en ese momento.
+ *         4. Concatenar todos los segmentos generados en un único archivo de video.
+ *     tags:
+ *       - Single API
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       description: Objeto JSON que contiene el tipo y el array de segmentos a procesar.
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               type:
+ *                 type: string
+ *                 enum: [compile_sequential_video]
+ *                 example: compile_sequential_video
+ *               data:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     base_64:
+ *                       type: string
+ *                       description: Cadena codificada en base64 del recurso (video o audio).
+ *                       example: "PIxAAAAANIAAAAAExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVV..."
+ *                     type:
+ *                       type: string
+ *                       enum: [video, tts]
+ *                       description: Tipo de recurso. "video" para actualizar el video activo, "tts" para audio.
+ *                       example: tts
+ *                     content:
+ *                       type: string
+ *                       description: Texto o contenido asociado, por ejemplo, para TTS.
+ *                       example: "¡Bienvenidos a [Nombre del Podcast]! Soy [Tu Nombre]..."
+ *                     id:
+ *                       type: number
+ *                       description: Identificador numérico que determina el orden del segmento.
+ *                       example: 0
+ *             required:
+ *               - type
+ *               - data
+ *     responses:
+ *       200:
+ *         description: Video compilado exitosamente.
+ *         content:
+ *           video/mp4:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       400:
+ *         description: Solicitud incorrecta, por ejemplo, falta de datos o formato inválido.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "The data field must be a non-empty array"
+ *       500:
+ *         description: Error interno en el servidor.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Internal server error"
+ */
+
 import { Request, Response, Router } from 'express';
 import fs from 'fs';
 import path from 'path';
@@ -119,6 +208,4 @@ router.post('/single_api', apiKeyMiddleware, async (req: Request, res: Response)
 });
 
 export default router;
-
 export const single_api = router;
-
