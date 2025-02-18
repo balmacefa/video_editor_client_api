@@ -38,11 +38,10 @@ export const createApp = async () => {
 
     // Middleware
     app.use(cors());
-    // Middleware
-    app.use(cors());
-    // Aumentamos el límite de la petición para JSON y urlencoded
-    app.use(express.json({ limit: '50mb' }));
-    app.use(express.urlencoded({ limit: '50mb', extended: true }));
+    
+    app.use(express.json({ limit: '8gb' }));
+    app.use(express.urlencoded({ limit: '8gb', extended: true }));
+
 
 
 
