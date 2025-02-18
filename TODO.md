@@ -1,20 +1,8 @@
 crear una api endpoint /single_api
 
-type: compile_sequential_video
-data:[{base_64:str, type:str, content: str, id: number}]
+Hacer debugger de https://n8n-y8oso4gkos44s8sgcck4o0oc.balmacefa.com/workflow/PX5PtSue5tH5ozcy/executions/119877
 
-que permite leer un array de 
-data:
-[
-    base_64
-    //PIxAAAAANIAAAAAExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVTEA8yECATYZ6ZmQJxYWTJ1Y15BAY2cqdm1LhkamFzoxYfMhAh6CPOwhgGLAcfDACl61GnsxEIII...
-    type: tts
-    content: ¡Bienvenidos a [Nombre del Podcast]! Soy [Tu Nombre], y juntos exploraremos los Derechos Humanos, el código ético que nos conecta a todos en este planeta.
-    id: 0
-]
-
-y los compile en orden de voz los documentos base64 tts,
-luego compilar usando los videos, cambiar cuando aparece uno en el stack del array. priorizando al siguiente video en pantalla.
+en /single-api
 
 retornar el docuemto binario en response.data
 

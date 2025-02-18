@@ -1,211 +1,187 @@
-/**
- * @swagger
- * /single_api:
- *   post:
- *     summary: Compila un video secuencial
- *     description: |
- *       Este endpoint recibe un objeto JSON con el tipo "compile_sequential_video" y un array de segmentos. 
- *       Cada segmento debe incluir:
- *         - **base_64**: Cadena codificada en base64 del video o audio.
- *         - **type**: Indica el tipo de segmento, que puede ser:
- *             - **video**: Actualiza el video activo que se usará en los siguientes segmentos.
- *             - **tts**: Representa audio (TTS) que se sobrepone al video activo.
- *         - **content**: Texto descriptivo o transcripción, en caso de ser TTS.
- *         - **id**: Número que determina el orden de los segmentos.
- *       El proceso consiste en:
- *         1. Procesar los segmentos en orden (según el campo **id**).
- *         2. Actualizar el video activo al encontrar un segmento de tipo "video".
- *         3. Combinar el audio TTS del segmento con el video activo en ese momento.
- *         4. Concatenar todos los segmentos generados en un único archivo de video.
- *     tags:
- *       - Single API
- *     security:
- *       - BearerAuth: []
- *     requestBody:
- *       description: Objeto JSON que contiene el tipo y el array de segmentos a procesar.
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               type:
- *                 type: string
- *                 enum: [compile_sequential_video]
- *                 example: compile_sequential_video
- *               data:
- *                 type: array
- *                 items:
- *                   type: object
- *                   properties:
- *                     base_64:
- *                       type: string
- *                       description: Cadena codificada en base64 del recurso (video o audio).
- *                       example: "PIxAAAAANIAAAAAExBTUUzLjEwMFVVVVVVVVVVVVVVVVVVVV..."
- *                     type:
- *                       type: string
- *                       enum: [video, tts]
- *                       description: Tipo de recurso. "video" para actualizar el video activo, "tts" para audio.
- *                       example: tts
- *                     content:
- *                       type: string
- *                       description: Texto o contenido asociado, por ejemplo, para TTS.
- *                       example: "¡Bienvenidos a [Nombre del Podcast]! Soy [Tu Nombre]..."
- *                     id:
- *                       type: number
- *                       description: Identificador numérico que determina el orden del segmento.
- *                       example: 0
- *             required:
- *               - type
- *               - data
- *     responses:
- *       200:
- *         description: Video compilado exitosamente.
- *         content:
- *           video/mp4:
- *             schema:
- *               type: string
- *               format: binary
- *       400:
- *         description: Solicitud incorrecta, por ejemplo, falta de datos o formato inválido.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: "The data field must be a non-empty array"
- *       500:
- *         description: Error interno en el servidor.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: "Internal server error"
- */
-
 import { Request, Response, Router } from 'express';
 import fs from 'fs';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import { v4 as uuidv4 } from 'uuid';
+import { celebrate, Joi, Segments } from 'celebrate';
 import { apiKeyMiddleware } from './apiKeyMiddleware';
+import { promisify } from 'util';
 
 ffmpeg.setFfmpegPath(ffmpegStatic);
 
 const router = Router();
 
-router.post('/single_api', apiKeyMiddleware, async (req: Request, res: Response): Promise<void> => {
-  try {
-    const { type, data } = req.body;
-
-    if (type !== 'compile_sequential_video') {
-      res.status(400).json({ error: 'Unsupported type' });
-      return;
-    }
-
-    if (!Array.isArray(data) || data.length === 0) {
-      res.status(400).json({ error: 'The data field must be a non-empty array' });
-      return;
-    }
-
-    // Ordenar los segmentos por el campo "id" para garantizar el orden correcto.
-    data.sort((a: any, b: any) => a.id - b.id);
-
-    // Crear un directorio temporal para almacenar los archivos generados.
-    const tempDir = path.join(process.cwd(), 'data', 'temp_single_api');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
-    }
-
-    // Definir un video activo por defecto (debe existir en la ruta indicada).
-    let currentVideoPath = path.join(process.cwd(), 'data', 'default_video.mp4');
-
-    // Arreglo para almacenar los segmentos generados (video + audio tts).
-    const segmentFiles: string[] = [];
-    let segmentIndex = 0;
-
-    // Procesar cada segmento del arreglo recibido.
-    for (const segment of data) {
-      if (segment.type === 'video') {
-        // Decodificar el video en base64 y guardarlo en un archivo temporal.
-        const videoBuffer = Buffer.from(segment.base_64, 'base64');
-        const tempVideoFile = path.join(tempDir, `video_${uuidv4()}.mp4`);
-        fs.writeFileSync(tempVideoFile, videoBuffer);
-        currentVideoPath = tempVideoFile;
-      } else if (segment.type === 'tts') {
-        // Decodificar el audio (tts) en base64 y guardarlo en un archivo temporal.
-        const audioBuffer = Buffer.from(segment.base_64, 'base64');
-        const tempAudioFile = path.join(tempDir, `audio_${uuidv4()}.mp3`);
-        fs.writeFileSync(tempAudioFile, audioBuffer);
-
-        // Combinar el video activo y el audio tts en un segmento usando FFmpeg.
-        const outputSegmentFile = path.join(tempDir, `segment_${segmentIndex++}.mp4`);
-        await new Promise<void>((resolve, reject) => {
-          ffmpeg()
-            .input(currentVideoPath)
-            .input(tempAudioFile)
-            .outputOptions('-shortest')
-            .on('error', (err) => {
-              console.error('Error creating segment:', err);
-              reject(err);
-            })
-            .on('end', () => {
-              console.log('Segment created:', outputSegmentFile);
-              resolve();
-            })
-            .save(outputSegmentFile);
-        });
-        segmentFiles.push(outputSegmentFile);
-      } else {
-        console.warn(`Unrecognized segment type: ${segment.type}`);
-      }
-    }
-
-    if (segmentFiles.length === 0) {
-      res.status(400).json({ error: 'No audio segments were generated for processing.' });
-      return;
-    }
-
-    // Crear un archivo de lista para FFmpeg que concatene todos los segmentos.
-    const concatListFile = path.join(tempDir, 'concat_list.txt');
-    const concatFileContent = segmentFiles.map(file => `file '${file}'`).join('\n');
-    fs.writeFileSync(concatListFile, concatFileContent);
-
-    // Generar el archivo de video final concatenando los segmentos.
-    const finalOutputFile = path.join(tempDir, `final_output_${uuidv4()}.mp4`);
-    await new Promise<void>((resolve, reject) => {
-      ffmpeg()
-        .input(concatListFile)
-        .inputOptions(['-f', 'concat', '-safe', '0'])
-        .outputOptions(['-c', 'copy'])
-        .on('error', (err) => {
-          console.error('Error during concatenation:', err);
-          reject(err);
-        })
-        .on('end', () => {
-          console.log('Final video generated:', finalOutputFile);
-          resolve();
-        })
-        .save(finalOutputFile);
-    });
-
-    // Leer el archivo final y retornar el video como respuesta binaria.
-    const finalVideoBuffer = fs.readFileSync(finalOutputFile);
-    res.set('Content-Type', 'video/mp4');
-    res.send(finalVideoBuffer);
-
-    // Opcional: implementar limpieza de archivos temporales.
-  } catch (error: any) {
-    console.error('Error in /single_api endpoint:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
-  }
+// Esquema de validación
+const sequentialVideoSchema = Joi.object({
+  type: Joi.string().valid('compile_sequential_video').required(),
+  data: Joi.array()
+    .items(
+      Joi.object({
+        base_64: Joi.string().required(),
+        type: Joi.string().valid('video', 'tts').required(),
+        content: Joi.string().optional(),
+        id: Joi.number().required(),
+      })
+    )
+    .min(1)
+    .required(),
 });
+
+const writeFileAsync = promisify(fs.writeFile);
+const readFileAsync = promisify(fs.readFile);
+const mkdirAsync = promisify(fs.mkdir);
+
+// Función para limpiar archivos y directorios temporales
+async function cleanupTempDir(tempDir: string) {
+  try {
+    // Aquí se puede usar una librería para remover recursivamente el directorio
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    console.log(`Directorio temporal ${tempDir} limpiado correctamente.`);
+  } catch (cleanupError) {
+    console.error(`Error al limpiar el directorio temporal ${tempDir}:`, cleanupError);
+  }
+}
+
+router.post(
+  '/single_api',
+  apiKeyMiddleware,
+  celebrate({ [Segments.BODY]: sequentialVideoSchema }),
+  async (req: Request, res: Response): Promise<void> => {
+    const processId = uuidv4();
+    const tempDir = path.join(process.cwd(), 'data', 'temp_single_api', processId);
+
+    try {
+      const { type, data } = req.body;
+      if (type !== 'compile_sequential_video') {
+        res.status(400).json({ error: 'Unsupported type' });
+        return; 
+      }
+
+      // Crear directorio temporal para el proceso
+      if (!fs.existsSync(tempDir)) {
+        await mkdirAsync(tempDir, { recursive: true });
+        console.log(`[Process ${processId}] Directorio temporal creado: ${tempDir}`);
+      }
+
+      // Ordenar segmentos por id
+      data.sort((a: any, b: any) => a.id - b.id);
+
+      // Verificar y definir video activo
+      let currentVideoPath = path.join(process.cwd(), 'data', 'default_video.mp4');
+      if (!fs.existsSync(currentVideoPath)) {
+        throw new Error('Default video not found');
+      }
+      console.log(`[Process ${processId}] Video activo inicial: ${currentVideoPath}`);
+
+      const segmentFiles: string[] = [];
+      let segmentIndex = 0;
+
+      // Procesar cada segmento
+      for (const segment of data) {
+        if (segment.type === 'video') {
+          try {
+            const videoBuffer = Buffer.from(segment.base_64, 'base64');
+            const tempVideoFile = path.join(tempDir, `video_${uuidv4()}.mp4`);
+            await writeFileAsync(tempVideoFile, videoBuffer);
+            currentVideoPath = tempVideoFile;
+            console.log(`[Process ${processId}] Video actualizado: ${currentVideoPath}`);
+          } catch (videoError) {
+            console.error(`[Process ${processId}] Error procesando segmento de video: ${videoError.message}`);
+            throw videoError;
+          }
+        } else if (segment.type === 'tts') {
+          try {
+            const audioBuffer = Buffer.from(segment.base_64, 'base64');
+            const tempAudioFile = path.join(tempDir, `audio_${uuidv4()}.mp3`);
+            await writeFileAsync(tempAudioFile, audioBuffer);
+            console.log(`[Process ${processId}] Audio TTS guardado: ${tempAudioFile}`);
+
+            const outputSegmentFile = path.join(tempDir, `segment_${segmentIndex++}.mp4`);
+            await new Promise<void>((resolve, reject) => {
+              // Agregar timeout en FFmpeg para evitar procesos colgados
+              const command = ffmpeg()
+                .input(currentVideoPath)
+                .input(tempAudioFile)
+                .outputOptions('-shortest')
+                .on('start', () => {
+                  console.log(`[Process ${processId}] Iniciando creación del segmento: ${outputSegmentFile}`);
+                })
+                .on('error', (err) => {
+                  console.error(`[Process ${processId}] Error en FFmpeg: ${err.message}`);
+                  reject(err);
+                })
+                .on('end', () => {
+                  console.log(`[Process ${processId}] Segmento creado: ${outputSegmentFile}`);
+                  resolve();
+                })
+                .save(outputSegmentFile);
+
+              // Timeout de 60 segundos para cada segmento
+              setTimeout(() => {
+                reject(new Error('Timeout en la creación del segmento'));
+              }, 60000);
+            });
+            segmentFiles.push(outputSegmentFile);
+          } catch (ttsError) {
+            console.error(`[Process ${processId}] Error procesando segmento TTS: ${ttsError.message}`);
+            throw ttsError;
+          }
+        } else {
+          console.warn(`[Process ${processId}] Segmento desconocido: ${segment.type}`);
+        }
+      }
+
+      if (segmentFiles.length === 0) {
+        res.status(400).json({ error: 'No se generaron segmentos de audio para el procesamiento.' });
+        return; 
+      }
+
+      // Crear archivo de lista para concatenación
+      const concatListFile = path.join(tempDir, 'concat_list.txt');
+      const concatFileContent = segmentFiles.map((file) => `file '${file}'`).join('\n');
+      await writeFileAsync(concatListFile, concatFileContent);
+      console.log(`[Process ${processId}] Archivo de lista creado: ${concatListFile}`);
+
+      // Generar video final concatenando segmentos
+      const finalOutputFile = path.join(tempDir, `final_output_${uuidv4()}.mp4`);
+      await new Promise<void>((resolve, reject) => {
+        const command = ffmpeg()
+          .input(concatListFile)
+          .inputOptions(['-f', 'concat', '-safe', '0'])
+          .outputOptions(['-c', 'copy'])
+          .on('start', () => {
+            console.log(`[Process ${processId}] Iniciando concatenación...`);
+          })
+          .on('error', (err) => {
+            console.error(`[Process ${processId}] Error en concatenación: ${err.message}`);
+            reject(err);
+          })
+          .on('end', () => {
+            console.log(`[Process ${processId}] Video final generado: ${finalOutputFile}`);
+            resolve();
+          })
+          .save(finalOutputFile);
+
+        // Timeout para la concatenación
+        setTimeout(() => {
+          reject(new Error('Timeout durante la concatenación de segmentos'));
+        }, 120000);
+      });
+
+      const finalVideoBuffer = await readFileAsync(finalOutputFile);
+      res.set('Content-Type', 'video/mp4');
+      res.send(finalVideoBuffer);
+      console.log(`[Process ${processId}] Proceso completado exitosamente.`);
+    } catch (error: any) {
+      console.error(`[Process ${processId}] Error en el endpoint /single_api:`, error);
+      res.status(500).json({ error: error.message || 'Internal server error' });
+    } finally {
+      // Siempre limpiar el directorio temporal, independientemente del resultado
+      await cleanupTempDir(tempDir);
+    }
+  }
+);
 
 export default router;
 export const single_api = router;
