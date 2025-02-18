@@ -35,7 +35,6 @@ const mkdirAsync = promisify(fs.mkdir);
 // Función para limpiar archivos y directorios temporales
 async function cleanupTempDir(tempDir: string) {
   try {
-    // Aquí se puede usar una librería para remover recursivamente el directorio
     fs.rmSync(tempDir, { recursive: true, force: true });
     console.log(`Directorio temporal ${tempDir} limpiado correctamente.`);
   } catch (cleanupError) {
@@ -64,15 +63,31 @@ router.post(
         console.log(`[Process ${processId}] Directorio temporal creado: ${tempDir}`);
       }
 
+      // Crear video por defecto en la carpeta temporal usando ffmpeg
+      const defaultVideoPath = path.join(tempDir, 'default_video.mp4');
+      await new Promise<void>((resolve, reject) => {
+        ffmpeg()
+          .input('color=c=black:s=640x480:d=5') // Video negro de 5 segundos
+          .inputFormat('lavfi')
+          .outputOptions(['-pix_fmt', 'yuv420p'])
+          .on('start', () => {
+            console.log(`[Process ${processId}] Creando video por defecto en ${defaultVideoPath}`);
+          })
+          .on('error', (err) => {
+            console.error(`[Process ${processId}] Error creando video por defecto: ${err.message}`);
+            reject(err);
+          })
+          .on('end', () => {
+            console.log(`[Process ${processId}] Video por defecto creado en ${defaultVideoPath}`);
+            resolve();
+          })
+          .save(defaultVideoPath);
+      });
+      let currentVideoPath = defaultVideoPath;
+      console.log(`[Process ${processId}] Video activo inicial: ${currentVideoPath}`);
+
       // Ordenar segmentos por id
       data.sort((a: any, b: any) => a.id - b.id);
-
-      // Verificar y definir video activo
-      let currentVideoPath = path.join(process.cwd(), 'data', 'default_video.mp4');
-      if (!fs.existsSync(currentVideoPath)) {
-        throw new Error('Default video not found');
-      }
-      console.log(`[Process ${processId}] Video activo inicial: ${currentVideoPath}`);
 
       const segmentFiles: string[] = [];
       let segmentIndex = 0;
@@ -99,7 +114,6 @@ router.post(
 
             const outputSegmentFile = path.join(tempDir, `segment_${segmentIndex++}.mp4`);
             await new Promise<void>((resolve, reject) => {
-              // Agregar timeout en FFmpeg para evitar procesos colgados
               const command = ffmpeg()
                 .input(currentVideoPath)
                 .input(tempAudioFile)
