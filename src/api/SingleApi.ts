@@ -19,7 +19,7 @@ const sequentialVideoSchema = Joi.object({
     .items(
       Joi.object({
         base_64: Joi.string().required(),
-        type: Joi.string().valid('video', 'tts').required(),
+        type: Joi.string().required(),
         content: Joi.string().optional(),
         id: Joi.number().required(),
       })
